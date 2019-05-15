@@ -1,0 +1,303 @@
+package com.psut.arduinorobot;
+
+import java.io.IOException;
+import java.util.List;
+
+import android.app.Activity;
+import android.content.Context;
+import android.content.Intent;
+import android.hardware.Sensor;
+import android.hardware.SensorEvent;
+import android.hardware.SensorEventListener;
+import android.hardware.SensorManager;
+import android.location.Location;
+import android.location.LocationListener;
+import android.location.LocationManager;
+import android.os.AsyncTask;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Message;
+import android.view.View;
+import android.widget.ScrollView;
+import android.widget.TextView;
+
+import com.hoho.android.usbserial.driver.UsbSerialDriver;
+
+public class SerialConsoleActivity extends Activity {
+
+    public static UsbSerialDriver sDriver = null;
+    public static TextView txtMyLat, txtMyLon, txtTargetLat, txtTargetLon, txtOutput;
+    public KeysHelper keys;
+    LocationManager lm;
+	LocationListener ll;
+	double latitude = 0, longitude = 0;
+	Location Target;
+	LocationHelper locations;
+	String key = " ", MyLatitude, MyLongitude;
+	public int azimuth = 0;
+	int Angle = 0, Bearing = 0, a, b;
+	float distance = 0;
+	public boolean direct = false, loop = true;
+	
+	Handler handler = new Handler() {
+		  @Override
+		  public void handleMessage(Message msg) {
+			  Bundle b = msg.getData();
+			   String key = b.getString("Angle");
+			   SendData(2);
+			   txtOutput.setText(txtOutput.getText().toString() + "> write:  " + key + '\n');
+			  ((ScrollView) findViewById(R.id.scrollView1)).fullScroll(View.FOCUS_DOWN);
+		     }
+		 };
+	
+	// Start Calculating the result Angle
+	@Override
+	protected void onStart() {
+		super.onStart();
+		Thread background = new Thread(new Runnable() {
+			@Override
+			public void run() {
+				while(true)
+				{
+					try {
+						// Delay before  writing result Angle
+						Thread.sleep(500); 
+					} catch (InterruptedException e) {
+						e.printStackTrace();
+					}
+				if(direct)
+					{
+					if(Bearing < 0)
+						Bearing += 360;
+				if(azimuth != Bearing)
+				{
+					if(azimuth < Bearing)
+					{
+						a = Bearing - azimuth;
+						b = 360 - a;
+						if(b < a)
+							Angle = -b;
+						else
+							Angle = a;
+					}
+					else
+					{
+						a = azimuth - Bearing;
+						b = 360 - a;
+						if(b < a)
+							Angle = b;
+						else
+							Angle = -a;
+					}
+				}
+				else
+					Angle = 0;
+				
+				Message msg = new Message();
+			      Bundle bun = new Bundle();
+				bun.putString("Angle", String.valueOf(Angle));
+			      msg.setData(bun);
+			      handler.sendMessage(msg);
+					}
+				}
+			}
+		});
+		background.start();
+	};
+		 
+    @Override
+    public void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.serial_console);
+        txtMyLat = (TextView) findViewById(R.id.textViewMyLat);
+        txtMyLon = (TextView) findViewById(R.id.textViewMyLon);
+        txtTargetLat = (TextView) findViewById(R.id.TextViewTargetLat);
+        txtTargetLon = (TextView) findViewById(R.id.TextViewTargetLon);
+        txtOutput = (TextView) findViewById(R.id.textViewOutput);
+        
+        sDriver = DeviceListActivity.mydriver;
+        
+    	keys = new KeysHelper(this);
+    	locations = new LocationHelper(this);
+    	locations.GetLocations();
+    	lm = (LocationManager) getSystemService(Context.LOCATION_SERVICE);
+		ll = new mylocationlistener();
+		lm.requestLocationUpdates(LocationManager.GPS_PROVIDER, 0, 0, ll);
+		Target = new Location("");
+		Target.setLatitude(Double.valueOf(locations.Lat2));
+		Target.setLongitude(Double.valueOf(locations.Lon2));
+        txtTargetLat.setText(locations.Lat1);
+    	txtTargetLon.setText(locations.Lon1);
+    	
+    	// Prepare Orientation Sensor to read Azimuth
+    	SensorManager sensorManager = (SensorManager) this.getSystemService(Context.SENSOR_SERVICE);
+        Sensor sensor;
+        @SuppressWarnings("deprecation")
+		List<Sensor> sensors = sensorManager.getSensorList(
+                Sensor.TYPE_ORIENTATION);
+        if (sensors.size() > 0) {
+            sensor = sensors.get(0);
+            sensorManager.registerListener(
+                    sensorEventListener, sensor, 
+                    SensorManager.SENSOR_DELAY_NORMAL);
+        } else {}
+        
+        // Open Driver to communicate with Arduino
+    	openDriver();
+    	
+    	// After 5 seconds, Start checking for predefined locations
+    	final Handler handler = new Handler();
+    	handler.postDelayed(new Runnable() {
+    		@Override
+    		public void run() {
+    			new CheckLocation().execute();
+    		}
+        }, 5000);
+    }
+    
+    // Sensor Listener, updates the value of Azimuth 
+    private SensorEventListener sensorEventListener = 
+		    new SensorEventListener() {
+		
+		    public void onAccuracyChanged(Sensor sensor, int accuracy) {}
+
+		    public void onSensorChanged(SensorEvent event) {
+		    	azimuth = (int) event.values[0];     // azimuth
+		    }
+		};
+		
+	// Function to send data to Arduino, receives int code,
+	// and based on the code we send the required data
+    public void SendData(int code)
+    {
+    	// Get saved keys in mobile
+    	keys.GetKeys();
+    	
+    	switch(code)
+    	{
+    	case 1:
+    		key = keys.stop;
+    		break;
+    	case 2:
+    		key = String.valueOf(Angle);
+    		break;
+    	case 3:
+    		key = keys.distance + String.valueOf(distance);
+    		break;
+    	}
+    	if (sDriver != null) 
+    	{    		
+    		try {
+    			byte[] bytes = key.getBytes("UTF-8");	// Convert string to bytes
+				sDriver.write(bytes, 4000);				// Write the bytes
+			} catch (IOException e) {
+				e.printStackTrace();
+			}
+        }
+    }
+    
+    //  Task to stop motors when we reach 
+    // any of the two predefined locations
+    class CheckLocation extends AsyncTask<String, String, String>
+    {
+		@Override
+		protected String doInBackground(String... params) {	
+			while(loop)
+			{
+			MyLatitude = String.valueOf(latitude);
+			MyLongitude = String.valueOf(longitude);
+			
+			if((MyLatitude.startsWith(locations.Lat1) && MyLongitude.startsWith(locations.Lon1)))
+			{
+				if(!direct)
+				{
+					try { Thread.sleep(600);} catch (InterruptedException e) {}
+					SendData(1);
+					publishProgress(key);
+					direct = true;
+					publishProgress("Direct");
+					
+				}	
+			}
+			if ((MyLatitude.startsWith(locations.Lat2) && MyLongitude.startsWith(locations.Lon2)))
+			{
+				SendData(1);
+				loop = false;
+				direct = false;
+			}
+			try {
+				Thread.sleep(500);
+			} catch (InterruptedException e) {}
+			}
+			
+			return key;
+		}
+		
+		@Override
+		protected void onProgressUpdate(String... values) {
+			txtOutput.setText(txtOutput.getText().toString() + "> write:  " + values[0] + '\n');
+		}
+    }  
+
+    // Location listener, when my location changes,
+    // we get the lat, lon, bearing and distance
+    public class mylocationlistener implements LocationListener {
+
+		@Override
+		public void onLocationChanged(Location location) {
+			latitude = location.getLatitude();
+			longitude = location.getLongitude();
+//			speed = location.getSpeed();
+			txtMyLat.setText(String.valueOf(latitude));
+			txtMyLon.setText(String.valueOf(longitude));
+			Bearing = (int) location.bearingTo(Target);
+			distance = location.distanceTo(Target);
+		}
+
+		@Override
+		public void onProviderDisabled(String provider) {
+			
+		}
+
+		@Override
+		public void onProviderEnabled(String provider) {
+			
+		}
+
+		@Override
+		public void onStatusChanged(String provider, int status, Bundle extras) {
+			
+		}
+	}
+    
+    private void openDriver()
+    {
+    	if (sDriver != null) 
+    	{    		
+    		try {
+				sDriver.open();
+                sDriver.setParameters(9600, 8, UsbSerialDriver.STOPBITS_1, UsbSerialDriver.PARITY_NONE);
+			} catch (IOException e1) {
+				e1.printStackTrace();
+			}
+    	}
+    }
+    
+    static void show(Context context, UsbSerialDriver driver) {
+        sDriver = driver;
+        final Intent intent = new Intent(context, SerialConsoleActivity.class);
+        intent.addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP | Intent.FLAG_ACTIVITY_NO_HISTORY);
+        context.startActivity(intent);
+    }
+    
+    @Override
+    protected void onDestroy() {
+    	lm.removeUpdates(ll);
+    	try {
+			sDriver.close();
+		} catch (IOException e) {
+			e.printStackTrace();
+		}
+    	super.onDestroy();
+    }
+}
